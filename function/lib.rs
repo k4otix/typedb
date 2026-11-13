@@ -4,7 +4,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use compiler::annotation::FunctionAnnotationError;
+use compiler::{annotation::FunctionAnnotationError, transformation::StaticOptimiserError};
 use concept::error::ConceptReadError;
 use encoding::error::EncodingError;
 use error::typedb_error;
@@ -32,5 +32,6 @@ typedb_error! {
         CommittedFunctionParseError(8, "Error while parsing committed function.", typedb_source: typeql::Error),
         StratificationViolation(9, "Detected a recursive cycle through a negation, reduction or single return: [{cycle_names}]", cycle_names: String),
         ConceptRead(10, "Concept read failed.", typedb_source: Box<ConceptReadError>),
+        CommittedFunctionsTransformation(11, "Error applying transformations to stored functions.", typedb_source: StaticOptimiserError),
     }
 }

@@ -7,7 +7,7 @@
 use std::{collections::HashMap, iter, sync::Arc};
 
 use answer::variable_value::VariableValue;
-use compiler::VariablePosition;
+use compiler::{VariablePosition, annotation::pipeline::AnnotatedStage};
 use concept::{
     thing::{statistics::Statistics, thing_manager::ThingManager},
     type_::type_manager::TypeManager,
@@ -19,12 +19,16 @@ use executor::{
     row::MaybeOwnedRow,
 };
 use function::function_manager::FunctionManager;
+use ir::pattern::constraint::Constraint;
 use itertools::{Either, Itertools};
 use lending_iterator::LendingIterator;
 use query::{given_rows::GivenRowsSimple, query_cache::QueryCache, query_manager::QueryManager};
 use resource::profile::CommitProfile;
 use storage::{
-    MVCCStorage, durability_client::WALClient, sequence_number::SequenceNumber, snapshot::CommittableSnapshot,
+    MVCCStorage,
+    durability_client::WALClient,
+    sequence_number::SequenceNumber,
+    snapshot::{CommittableSnapshot, ReadableSnapshot},
 };
 use test_utils::TempDir;
 use test_utils_concept::{load_managers, setup_concept_storage};
@@ -849,4 +853,27 @@ fn distinct_after_disjunction() {
     let query = format!("{query} distinct;");
     let (rows, _positions) = run_read_query(&context, &query).unwrap();
     assert_eq!(rows.len(), 1);
+}
+
+#[test]
+fn schema_function_uses_relation_index() {
+    fn uses_relation_index(context: &Context, snapshot: impl ReadableSnapshot) -> bool {
+        let functions = context.function_manager.get_annotated_functions(&snapshot, &context.type_manager).unwrap();
+        let function = functions.values().next().unwrap();
+        let AnnotatedStage::Match { block, .. } = &function.stages[0] else { unreachable!() };
+        block.conjunction().constraints().iter().any(|constraint| matches!(constraint, Constraint::IndexedRelation(_)))
+    }
+
+    let custom_schema = r#"define
+        entity node, plays edge:start, plays edge:end_;
+        relation edge, relates start, relates end_;
+        fun children($start: node) -> { node }:
+        match
+            $e isa edge, links (start: $start, end_: $child);
+        return { $child };
+    "#;
+    let context = setup_common(custom_schema);
+    assert!(uses_relation_index(&context, context.storage.clone().open_snapshot_read()));
+    // The relation index is not available to schema transactions
+    assert!(!uses_relation_index(&context, context.storage.clone().open_snapshot_schema()));
 }

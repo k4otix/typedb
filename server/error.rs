@@ -245,7 +245,8 @@ impl ServerStateError for LocalServerStateError {
                     | FunctionError::CommittedFunctionParseError { .. }
                     | FunctionError::StratificationViolation { .. } => Request,
                     FunctionError::ConceptRead { typedb_source } => concept_read_origin(typedb_source),
-                    FunctionError::CreateFunctionEncoding { .. } => Internal,
+                    FunctionError::CreateFunctionEncoding { .. }
+                    | FunctionError::CommittedFunctionsTransformation { .. } => Internal,
                     FunctionError::FunctionRetrieval { typedb_source } => function_read_origin(typedb_source),
                 },
                 SchemaCommitError::TypeCacheUpdateError { typedb_source } => match typedb_source {

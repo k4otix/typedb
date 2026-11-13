@@ -8,7 +8,10 @@ use ir::pipeline::VariableRegistry;
 use storage::snapshot::ReadableSnapshot;
 
 use crate::{
-    annotation::pipeline::{AnnotatedPipeline, AnnotatedStage},
+    annotation::{
+        function::AnnotatedFunction,
+        pipeline::{AnnotatedPipeline, AnnotatedStage},
+    },
     transformation::{
         StaticOptimiserError,
         redundant_constraints::{
@@ -25,7 +28,27 @@ pub fn apply_transformations(
     variable_registry: &mut VariableRegistry,
     pipeline: &mut AnnotatedPipeline,
 ) -> Result<(), StaticOptimiserError> {
-    for stage in &mut pipeline.annotated_stages {
+    for function in &mut pipeline.annotated_preamble {
+        apply_transformations_to_function(snapshot, type_manager, function)?;
+    }
+    apply_transformations_to_stages(snapshot, type_manager, variable_registry, &mut pipeline.annotated_stages)
+}
+
+pub fn apply_transformations_to_function(
+    snapshot: &impl ReadableSnapshot,
+    type_manager: &TypeManager,
+    function: &mut AnnotatedFunction,
+) -> Result<(), StaticOptimiserError> {
+    apply_transformations_to_stages(snapshot, type_manager, &mut function.variable_registry, &mut function.stages)
+}
+
+fn apply_transformations_to_stages(
+    snapshot: &impl ReadableSnapshot,
+    type_manager: &TypeManager,
+    variable_registry: &mut VariableRegistry,
+    stages: &mut [AnnotatedStage],
+) -> Result<(), StaticOptimiserError> {
+    for stage in stages {
         if let AnnotatedStage::Match { block, block_annotations, .. } = stage {
             optimize_away_statically_unsatisfiable_conjunctions(block.conjunction_mut(), block_annotations);
             prune_redundant_roleplayer_deduplication(block.conjunction_mut(), block_annotations);
