@@ -1019,3 +1019,33 @@ fn disjunction_branch_with_duplicate_answers() {
     let (rows, _positions) = run_read_query(&context, query).unwrap();
     assert_eq!(rows.len(), 4);
 }
+
+#[test]
+fn repeated_function_calls() {
+    let custom_schema = r#"define
+        attribute name value string;
+        entity node, owns name @card(0..), plays edge:start, plays edge:end_;
+        relation edge, relates start, relates end_;
+    "#;
+    let context = setup_common(custom_schema);
+    run_write_query(&context, REACHABILITY_DATA).unwrap();
+
+    // Both functions are called with t1 for each of the 19 nodes. The call in first_child stops after its first row
+    let query = r#"
+        with fun children($parent: node) -> { node }:
+        match edge (start: $parent, end_: $child);
+        return { $child };
+
+        with fun first_child($parent: node) -> node:
+        match let $child in children($parent);
+        return first $child;
+
+        match
+            $t1 isa node, has name "t1";
+            $node isa node;
+        match let $first = first_child($t1);
+        match let $child in children($t1);
+    "#;
+    let (rows, _positions) = run_read_query(&context, query).unwrap();
+    assert_eq!(rows.len(), 38);
+}

@@ -31,6 +31,7 @@ use crate::{
         reduce::ReduceStageExecutor,
         update::UpdateStageExecutor,
     },
+    read::function_call_cache::FunctionCallCache,
     row::MaybeOwnedRow,
 };
 
@@ -41,6 +42,8 @@ pub struct ExecutionContext<Snapshot> {
     pub function_manager: Arc<FunctionManager>,
     pub parameters: Arc<ParameterRegistry>,
     pub profile: Arc<QueryProfile>,
+    // Only set for pipelines that do not write, so the data a function reads cannot change between its calls
+    pub(crate) function_call_cache: Option<Arc<FunctionCallCache>>,
 }
 
 impl<Snapshot> ExecutionContext<Snapshot> {
@@ -66,7 +69,18 @@ impl<Snapshot> ExecutionContext<Snapshot> {
         parameters: Arc<ParameterRegistry>,
         query_profile: Arc<QueryProfile>,
     ) -> Self {
-        Self { snapshot, thing_manager, function_manager, parameters, profile: query_profile }
+        Self {
+            snapshot,
+            thing_manager,
+            function_manager,
+            parameters,
+            profile: query_profile,
+            function_call_cache: None,
+        }
+    }
+
+    pub(crate) fn with_function_call_cache(self) -> Self {
+        Self { function_call_cache: Some(Arc::new(FunctionCallCache::default())), ..self }
     }
 
     pub(crate) fn clone_with_replaced_parameters(&self, parameters: Arc<ParameterRegistry>) -> Self {
@@ -76,6 +90,7 @@ impl<Snapshot> ExecutionContext<Snapshot> {
             function_manager: self.function_manager.clone(),
             parameters,
             profile: self.profile.clone(),
+            function_call_cache: self.function_call_cache.clone(),
         }
     }
 
@@ -102,13 +117,14 @@ impl<Snapshot> ExecutionContext<Snapshot> {
 
 impl<Snapshot> Clone for ExecutionContext<Snapshot> {
     fn clone(&self) -> Self {
-        let Self { snapshot, thing_manager, parameters, function_manager, profile } = self;
+        let Self { snapshot, thing_manager, parameters, function_manager, profile, function_call_cache } = self;
         Self {
             snapshot: snapshot.clone(),
             thing_manager: thing_manager.clone(),
             function_manager: function_manager.clone(),
             parameters: parameters.clone(),
             profile: profile.clone(),
+            function_call_cache: function_call_cache.clone(),
         }
     }
 }

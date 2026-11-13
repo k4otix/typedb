@@ -117,7 +117,8 @@ impl<Snapshot: ReadableSnapshot + 'static> Pipeline<Snapshot, ReadPipelineStage<
             function_manager,
             parameters.clone(),
             query_profile,
-        );
+        )
+        .with_function_call_cache();
 
         let initial_iterator = InitialStage::new(given_batch);
         let initial_iterator = ReadStageIterator::Initial(Box::new(initial_iterator.into_iterator()));
