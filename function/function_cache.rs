@@ -6,7 +6,10 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use compiler::annotation::function::{AnnotatedFunction, AnnotatedSchemaFunctions, annotate_stored_functions};
+use compiler::{
+    annotation::function::{AnnotatedFunction, AnnotatedSchemaFunctions, annotate_stored_functions},
+    transformation::transform::apply_transformations_to_function,
+};
 use concept::type_::type_manager::TypeManager;
 use encoding::graph::definition::definition_key::DefinitionKey;
 use ir::pipeline::function_signature::{FunctionSignatureIndex, HashMapFunctionSignatureIndex};
@@ -49,8 +52,12 @@ impl FunctionCache {
         let mut functions_ir = FunctionManager::translate_functions(&schema_functions, &function_index)?;
 
         // Run type-inference
-        let annotated_functions = annotate_stored_functions(&mut functions_ir, snapshot, type_manager)
+        let mut annotated_functions = annotate_stored_functions(&mut functions_ir, snapshot, type_manager)
             .map_err(|source| FunctionError::CommittedFunctionsTypeCheck { typedb_source: source })?;
+        for function in annotated_functions.values_mut() {
+            apply_transformations_to_function(snapshot, type_manager, function)
+                .map_err(|source| FunctionError::CommittedFunctionsTransformation { typedb_source: source })?;
+        }
 
         let parsed_functions =
             schema_functions.into_iter().map(|parsed| (parsed.function_id.clone(), parsed)).collect();

@@ -8,20 +8,31 @@ use std::sync::Arc;
 
 use compiler::{
     annotation::{
-        PipelineAnnotationContext, function::EmptyAnnotatedFunctionSignatures,
-        inference::match_inference::infer_types_for_test_only, type_annotations::BlockAnnotations,
+        PipelineAnnotationContext,
+        function::{AnnotatedSchemaFunctions, EmptyAnnotatedFunctionSignatures},
+        inference::match_inference::infer_types_for_test_only,
+        pipeline::{AnnotatedStage, annotate_preamble_and_pipeline},
+        type_annotations::BlockAnnotations,
     },
     transformation::{
         redundant_constraints::optimize_away_statically_unsatisfiable_conjunctions,
-        relation_index::relation_index_transformation,
+        relation_index::relation_index_transformation, transform::apply_transformations,
     },
 };
 use concept::type_::{Ordering, OwnerAPI, PlayerAPI, type_manager::TypeManager};
 use encoding::value::label::Label;
 use ir::{
     pattern::{Vertex, constraint::Constraint},
-    pipeline::{ParameterRegistry, block::Block, function_signature::HashMapFunctionSignatureIndex},
-    translation::{PipelineTranslationContext, match_::translate_match},
+    pipeline::{
+        ParameterRegistry,
+        block::Block,
+        function_signature::{FunctionID, HashMapFunctionSignatureIndex},
+    },
+    translation::{
+        PipelineTranslationContext,
+        match_::translate_match,
+        pipeline::{TranslatedPipeline, translate_pipeline},
+    },
 };
 use itertools::Itertools;
 use resource::profile::{CommitProfile, StorageCounters};
@@ -546,5 +557,76 @@ fn run_test_optimise_away(snapshot: impl ReadableSnapshot, type_manager: &TypeMa
             .exactly_one()
             .unwrap();
         assert!(matches!(must_be_optimised_to_unsatisfiable, Constraint::Unsatisfiable(_)))
+    }
+}
+
+#[test]
+fn test_relation_index_transformation_preamble_function_schema_snapshot() {
+    let (_tmp_dir, mut storage) = create_core_storage();
+    setup_database(&mut storage);
+    let (type_manager, _thing_manager) = load_managers(storage.clone(), None);
+    let snapshot = storage.clone().open_snapshot_schema();
+    run_test_relation_index_transformation_preamble_function(snapshot, &type_manager, false);
+}
+
+#[test]
+fn test_relation_index_transformation_preamble_function_read_snapshot() {
+    let (_tmp_dir, mut storage) = create_core_storage();
+    setup_database(&mut storage);
+    let (type_manager, _thing_manager) = load_managers(storage.clone(), None);
+    let snapshot = storage.clone().open_snapshot_read();
+    run_test_relation_index_transformation_preamble_function(snapshot, &type_manager, true);
+}
+
+fn run_test_relation_index_transformation_preamble_function(
+    snapshot: impl ReadableSnapshot,
+    type_manager: &TypeManager,
+    expect_index: bool,
+) {
+    let query = r#"
+        with
+        fun dogs_of($p: person) -> { dog }:
+        match
+            $r isa dog-ownership, links (owner: $p, dog: $d);
+        return { $d };
+
+        match
+            $x isa person;
+            let $y in dogs_of($x);
+    "#;
+    let parsed = typeql::parse_query(query).unwrap().into_structure().into_pipeline();
+    let signatures = HashMapFunctionSignatureIndex::build(
+        parsed.preambles.iter().enumerate().map(|(i, preamble)| (FunctionID::Preamble(i), &preamble.function)),
+    );
+    let TranslatedPipeline {
+        translated_preamble,
+        translated_given,
+        translated_stages,
+        translated_fetch,
+        mut variable_registry,
+        value_parameters,
+    } = translate_pipeline(&signatures, &parsed).unwrap();
+    let mut pipeline = annotate_preamble_and_pipeline(
+        &snapshot,
+        type_manager,
+        Arc::new(AnnotatedSchemaFunctions::new()),
+        &mut variable_registry,
+        &value_parameters,
+        translated_preamble,
+        translated_given,
+        translated_stages,
+        translated_fetch,
+    )
+    .unwrap();
+    apply_transformations(&snapshot, type_manager, &mut variable_registry, &mut pipeline).unwrap();
+
+    let AnnotatedStage::Match { block, .. } = &pipeline.annotated_preamble[0].stages[0] else { unreachable!() };
+    let constraints = block.conjunction().constraints();
+    if expect_index {
+        assert!(constraints.iter().any(|constraint| matches!(constraint, Constraint::IndexedRelation(_))));
+        assert!(!constraints.iter().any(|constraint| matches!(constraint, Constraint::Links(_))));
+    } else {
+        assert!(!constraints.iter().any(|constraint| matches!(constraint, Constraint::IndexedRelation(_))));
+        assert_eq!(2, constraints.iter().filter(|constraint| matches!(constraint, Constraint::Links(_))).count());
     }
 }
