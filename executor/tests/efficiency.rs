@@ -1550,15 +1550,15 @@ fn intersections_seeks_with_extra_values() {
     let storage_counters = intersection_step_profile.storage_counters();
 
     // expected evaluation
-    //  open initial iterators: 2 seeks... HasReverse[age 12] finds Person 3. Has[unbound] finds Person 1 and attributes
-    //      Has[unbound] Person1 advances 4 past age 10, gov id 0, gov id 1, gov id 2, lands on GovId3
-    //  Has[unbound] does 1 seek (induces 1 advance) to Person3+GovID2... Now at Person3.GovID4. match!
+    //  open initial iterators: 2 seeks... HasReverse[age 12] finds Person 3.
+    //  Has[unbound] is not peeked before it does 1 seek to Person3, so it does not advance through Person1's attributes
+    //      Now at Person3.GovID4. match!
     //  HasReverse does 1 advance to fail.
     //      Has[unbound] will do 4 advance through Person4+Age10, Person5+Age10|GovID6, Person6+GovID6, plus 1 advance to fail.
     //      ==> TODO: this should be optimisable with a short-circuit, but it is currently impossible due to iterators skipping values internally!
 
     assert_eq!(storage_counters.get_raw_seek().unwrap(), 3);
-    assert_eq!(storage_counters.get_raw_advance().unwrap(), 9)
+    assert_eq!(storage_counters.get_raw_advance().unwrap(), 4)
 }
 
 // Strings longer than 16 bytes are stored under a hash of the value, keyed by only its first 8 bytes. These names all

@@ -4,7 +4,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use std::{cmp::Ordering, collections::HashMap, fmt, sync::Arc};
+use std::{cmp::Ordering, collections::HashMap, fmt, iter, sync::Arc};
 
 use answer::variable_value::VariableValue;
 use compiler::{
@@ -173,6 +173,7 @@ impl ImmediateExecutor {
 /// Cartesian sub-program, which generates all cartesian answers within one intersection, if there are any.
 pub(crate) struct IntersectionExecutor {
     instruction_executors: Vec<InstructionExecutor>,
+    instructions_bound: Vec<bool>,
     output_width: u32,
     outputs_selected: SelectedPositions,
 
@@ -211,6 +212,8 @@ impl IntersectionExecutor {
         let first_batch_rows =
             row_goal.map_or(FIXED_BATCH_ROWS_MAX, |goal| goal.clamp(1, FIXED_BATCH_ROWS_MAX as u64) as u32);
         let instruction_count = instructions.len();
+        let instructions_bound =
+            instructions.iter().map(|(_, variable_modes)| !variable_modes.none_inputs()).collect_vec();
         let executors: Vec<InstructionExecutor> = instructions
             .into_iter()
             .map(|(instruction, variable_modes)| {
@@ -220,6 +223,7 @@ impl IntersectionExecutor {
 
         Ok(Self {
             instruction_executors: executors,
+            instructions_bound,
             output_width,
             outputs_selected: SelectedPositions::new(select_variables),
             iterators: Vec::with_capacity(instruction_count),
@@ -452,18 +456,45 @@ impl IntersectionExecutor {
         if let Some(input) = peek {
             let next_row: &MaybeOwnedRow<'_> = input.as_ref().map_err(|err| (*err).clone())?;
             self.intersection_provenance = next_row.provenance();
-            for executor in &self.instruction_executors {
+            // An unbound iterator may read far into its range to find its first value. The intersection cannot be
+            // before the first value of a bound iterator, so the unbound iterators are sought there first.
+            let mut first_bound_value: Option<VariableValue<'static>> = None;
+            for (executor, &is_bound) in iter::zip(&self.instruction_executors, &self.instructions_bound) {
                 let mut iterator = executor
                     .get_iterator(context, next_row.as_reference(), self.profile.storage_counters())
                     .map_err(|err| ReadExecutionError::CreatingIterator {
                         instruction_name: executor.name().to_string(),
                         typedb_source: err,
                     })?;
-                if iterator.peek().is_none() {
+                if is_bound {
+                    match iterator.peek_first_unbound_value() {
+                        None => {
+                            self.iterators.clear();
+                            return Ok(());
+                        }
+                        Some(Ok(value)) if first_bound_value.as_ref().is_none_or(|max| value > max) => {
+                            first_bound_value = Some(value.clone().into_owned());
+                        }
+                        Some(_) => (),
+                    }
+                }
+                self.iterators.push(iterator);
+            }
+            for (iterator, &is_bound) in iter::zip(&mut self.iterators, &self.instructions_bound) {
+                if is_bound {
+                    continue;
+                }
+                let is_empty = match &first_bound_value {
+                    Some(value) => iterator
+                        .advance_until_first_unbound_is(value)
+                        .map_err(|err| ReadExecutionError::AdvancingIteratorTo { typedb_source: err })?
+                        .is_none(),
+                    None => iterator.peek().is_none(),
+                };
+                if is_empty {
                     self.iterators.clear();
                     return Ok(());
                 }
-                self.iterators.push(iterator);
             }
         }
         Ok(())
