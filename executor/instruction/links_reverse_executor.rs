@@ -17,11 +17,20 @@ use compiler::{ExecutorVariable, executable::match_::instructions::thing::LinksR
 use concept::{
     error::ConceptReadError,
     thing::{
+        ThingAPI,
         object::Object,
         relation::{Links, LinksReverseIterator},
         thing_manager::ThingManager,
     },
-    type_::{object_type::ObjectType, relation_type::RelationType},
+    type_::{TypeAPI, object_type::ObjectType, relation_type::RelationType, role_type::RoleType},
+};
+use encoding::graph::{
+    Typed,
+    thing::{
+        edge::ThingEdgeLinks,
+        vertex_object::{ObjectID, ObjectVertex},
+    },
+    type_::vertex::TypeVertexEncoding,
 };
 use itertools::Itertools;
 use lending_iterator::kmerge::KMergeBy;
@@ -36,7 +45,7 @@ use crate::{
         iterator::{SortedTupleIterator, TupleIterator},
         links_executor::{
             EXTRACT_PLAYER, EXTRACT_RELATION, EXTRACT_ROLE, FixedLinksBounds, LinksFilterFn, LinksFilterMapFn,
-            LinksTupleIterator, may_get_role, verify_role,
+            LinksSkipFn, LinksTupleIterator, may_get_role, verify_role,
         },
         min_max_types,
         tuple::{
@@ -63,6 +72,7 @@ pub(crate) struct LinksReverseExecutor {
     relation_type_range: Bounds<RelationType>,
 
     filter_fn: Arc<LinksFilterFn>,
+    skip_fn: Arc<LinksSkipFn>,
     player_cache: Option<Vec<Object>>,
 
     checker: Checker<(Links, u64)>,
@@ -93,6 +103,7 @@ impl LinksReverseExecutor {
         let LinksReverseInstruction { links, checks, .. } = links_reverse;
         let iterate_mode = LinksIterateMode::new(links.player(), links.relation(), &variable_modes, sort_by);
         let filter_fn = create_links_filter_relations_players_roles(player_relation_types.clone(), relation_role_types);
+        let skip_fn = create_links_skip_unwanted_types(player_relation_types.clone());
 
         let relation = links.relation().as_variable().unwrap();
         let player = links.player().as_variable().unwrap();
@@ -153,6 +164,7 @@ impl LinksReverseExecutor {
             player_type_range,
             relation_type_range,
             filter_fn,
+            skip_fn,
             player_cache,
             checker,
         })
@@ -198,7 +210,8 @@ impl LinksReverseExecutor {
                     links_to_tuple_player_relation_role,
                     tuple_player_relation_role_to_links_reverse,
                     FixedLinksBounds::None,
-                );
+                )
+                .with_skip_fn(self.skip_fn.clone());
                 Ok(TupleIterator::LinksReverseSingle(SortedTupleIterator::new(
                     as_tuples,
                     self.tuple_positions.clone(),
@@ -333,6 +346,39 @@ fn create_links_filter_relations_players_roles(
         let role_type = Type::from(links.role_type());
         Ok(relation_types.contains(&relation_type)
             && relation_to_role.get(&relation_type).is_some_and(|role_types| role_types.contains(&role_type)))
+    })
+}
+
+// Reverse links are ordered by player, then relation type. Links of a player whose type is not wanted, or of a
+// relation type not wanted for the player's type, are skipped to the next wanted relation type of the player, the
+// next player, or past all players of the type.
+fn create_links_skip_unwanted_types(player_to_relation: Arc<BTreeMap<Type, Vec<Type>>>) -> Arc<LinksSkipFn> {
+    let reverse = |player, relation, role: RoleType| {
+        Links::EdgeReverse(ThingEdgeLinks::new_reverse(player, relation, role.vertex()))
+    };
+    let past_player = move |player| reverse(player, ObjectVertex::MAX_RELATION, RoleType::MAX);
+    Arc::new(move |links| {
+        let player = links.player().vertex();
+        let Some(relation_types) = player_to_relation.get(&Type::from(links.player().type_())) else {
+            let last_of_type = if player.is_entity() {
+                ObjectVertex::build_entity(player.type_id_(), ObjectID::MAX)
+            } else {
+                ObjectVertex::build_relation(player.type_id_(), ObjectID::MAX)
+            };
+            return Some(past_player(last_of_type));
+        };
+        let relation_type = Type::from(links.relation().type_());
+        if relation_types.contains(&relation_type) {
+            return None;
+        }
+        match relation_types.iter().filter(|&&wanted| wanted > relation_type).min() {
+            Some(next_type) => {
+                let first_of_type =
+                    ObjectVertex::build_relation(next_type.as_relation_type().vertex().type_id_(), ObjectID::MIN);
+                Some(reverse(player, first_of_type, RoleType::MIN))
+            }
+            None => Some(past_player(player)),
+        }
     })
 }
 

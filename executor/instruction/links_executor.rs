@@ -76,6 +76,11 @@ pub(crate) type LinksTupleIteratorMerged = KMergeBy<LinksTupleIterator<LinksIter
 
 pub(super) type LinksFilterFn = FilterFn<(Links, u64)>;
 pub(super) type LinksFilterMapFn = FilterMapUnchangedFn<(Links, u64)>;
+// Returns the next links the filter could accept, if it rejects the given links and every links up to that one
+pub(super) type LinksSkipFn = dyn Fn(&Links) -> Option<Links>;
+
+// A seek costs more than a few advances
+const REJECTED_ADVANCES_BEFORE_SEEK: usize = 8;
 
 type LinksVariableValueExtractor = fn(&(Links, u64)) -> VariableValue<'static>;
 pub(super) const EXTRACT_RELATION: LinksVariableValueExtractor =
@@ -342,6 +347,7 @@ pub struct LinksTupleIterator<Iter: LendingIterator> {
     to_tuple_fn: LinksToTupleFn,
     from_tuple_fn: TupleToLinksFn,
     fixed_bounds: FixedLinksBounds,
+    skip_fn: Option<Arc<LinksSkipFn>>,
 }
 
 impl<Iter> LinksTupleIterator<Iter>
@@ -356,7 +362,11 @@ where
         from_tuple_fn: TupleToLinksFn,
         fixed_bounds: FixedLinksBounds,
     ) -> Self {
-        Self { inner, filter_map, to_tuple_fn, from_tuple_fn, fixed_bounds }
+        Self { inner, filter_map, to_tuple_fn, from_tuple_fn, fixed_bounds, skip_fn: None }
+    }
+
+    pub(super) fn with_skip_fn(self, skip_fn: Arc<LinksSkipFn>) -> Self {
+        Self { skip_fn: Some(skip_fn), ..self }
     }
 }
 
@@ -369,9 +379,19 @@ where
 
     fn next(&mut self) -> Option<Self::Item<'_>> {
         // TODO: can this be simplified with something like `.by_ref()` on iterators?
+        let mut rejected = 0;
         while let Some(next) = self.inner.next() {
+            let skip_target = match (&self.skip_fn, &next) {
+                (Some(skip_fn), Ok((links, _))) if rejected >= REJECTED_ADVANCES_BEFORE_SEEK => skip_fn(links),
+                _ => None,
+            };
             if let Some(filter_mapped) = (self.filter_map)(next) {
                 return Some((self.to_tuple_fn)(filter_mapped));
+            }
+            rejected += 1;
+            if let Some(target) = skip_target {
+                lending_iterator::Seekable::seek(&mut self.inner, &Ok((target, 0)));
+                rejected = 0;
             }
         }
         None
@@ -384,7 +404,10 @@ where
         + for<'a> LendingIterator<Item<'a> = Result<(Links, u64), Box<ConceptReadError>>>,
 {
     fn seek(&mut self, target: &Tuple<'_>) -> Result<(), Box<ConceptReadError>> {
-        let target_links = (self.from_tuple_fn)(&target, &self.fixed_bounds);
+        let mut target_links = (self.from_tuple_fn)(&target, &self.fixed_bounds);
+        if let Some(skipped) = self.skip_fn.as_ref().and_then(|skip_fn| skip_fn(&target_links)) {
+            target_links = skipped;
+        }
         let target_pair = (target_links, 0);
         lending_iterator::Seekable::seek(&mut self.inner, &Ok(target_pair));
         Ok(())
