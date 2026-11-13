@@ -900,3 +900,55 @@ fn role_name_shared_between_relation_types() {
     let (rows, _positions) = run_read_query(&context, "match $r links (employee: $p, employer: $p);").unwrap();
     assert_eq!(rows.len(), 1);
 }
+
+#[test]
+fn nested_patterns_stop_early() {
+    let custom_schema = r#"define
+        attribute name value string;
+        entity node, owns name @card(0..), plays edge:start, plays edge:end_;
+        relation edge, relates start, relates end_;
+    "#;
+    let context = setup_common(custom_schema);
+    // Both hubs have 100 children. Only the last child of hub1 has a child of its own.
+    let children = (0..100)
+        .map(|i| {
+            format!("$a{i} isa node; edge (start: $h1, end_: $a{i}); $b{i} isa node; edge (start: $h2, end_: $b{i});")
+        })
+        .join("\n");
+    let data = format!(
+        r#"insert
+        $h1 isa node, has name "hub1";
+        $h2 isa node, has name "hub2";
+        {children}
+        $leaf isa node; edge (start: $a99, end_: $leaf);"#
+    );
+    run_write_query(&context, &data).unwrap();
+
+    let query = r#"
+        match
+            $hub isa node, has name $name;
+            not { edge (start: $hub, end_: $child); edge (start: $child, end_: $leaf); };
+    "#;
+    let (rows, _positions) = run_read_query(&context, query).unwrap();
+    assert_eq!(rows.len(), 1);
+
+    let query = r#"
+        with fun some_children($hub: node) -> { node }:
+        match edge (start: $hub, end_: $child);
+        offset 2; limit 3;
+        return { $child };
+
+        with fun first_grandchild($hub: node) -> node:
+        match edge (start: $hub, end_: $child); edge (start: $child, end_: $leaf);
+        return first $leaf;
+
+        match
+            $hub isa node, has name $name;
+            let $child in some_children($hub);
+            try { let $leaf = first_grandchild($hub); };
+    "#;
+    let (rows, positions) = run_read_query(&context, query).unwrap();
+    assert_eq!(rows.len(), 6);
+    let leaf_position = *positions.get("leaf").unwrap();
+    assert_eq!(rows.iter().filter(|row| !row.get(leaf_position).is_none()).count(), 3);
+}

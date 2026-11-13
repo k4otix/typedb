@@ -74,6 +74,7 @@ pub(super) fn create_pattern_executor_for_conjunction(
         function_registry,
         pattern_profile,
         conjunction_executable,
+        None,
     )?;
     Ok(PatternExecutor::new(conjunction_executable.executable_id(), executors))
 }

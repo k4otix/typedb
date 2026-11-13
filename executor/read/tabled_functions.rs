@@ -52,6 +52,8 @@ impl TabledFunctions {
                 &self.function_registry,
                 context.profile.clone(),
                 function,
+                // Shared by every caller, so no caller's row goal applies
+                None,
             )
             .map_err(|source| ReadExecutionError::ConceptRead { typedb_source: source })?;
             let pattern_executor = PatternExecutor::new(function.executable_id, executors);

@@ -195,7 +195,13 @@ impl PatternExecutor {
                         inner.batch_continue(context, interrupt, tabled_functions, suspensions)
                     })?;
                     if let Some(batch) = mapper.map_output(unmapped) {
-                        control_stack.push(ExecuteStreamModifier { index, mapper, input: input.into_owned() }.into());
+                        if mapper.is_satisfied() {
+                            // Any further rows of the inner pattern would be discarded by the mapper
+                            inner.reset();
+                        } else {
+                            control_stack
+                                .push(ExecuteStreamModifier { index, mapper, input: input.into_owned() }.into());
+                        }
                         self.push_next_instruction(context, index.next(), batch)?;
                     }
                 }

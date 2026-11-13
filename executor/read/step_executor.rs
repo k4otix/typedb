@@ -38,6 +38,9 @@ use crate::{
     },
 };
 
+// A negation is decided by the first row of its pattern
+const NEGATION_ROW_GOAL: Option<u64> = Some(1);
+
 #[derive(Debug)]
 pub enum StepExecutors {
     Immediate(ImmediateExecutor),
@@ -155,6 +158,7 @@ pub(crate) fn create_executors_for_conjunction(
     function_registry: &ExecutableFunctionRegistry,
     pattern_profile: Arc<PatternProfile>,
     conjunction_executable: &ConjunctionExecutable,
+    row_goal: Option<u64>,
 ) -> Result<Vec<StepExecutors>, Box<ConceptReadError>> {
     let mut steps = Vec::with_capacity(conjunction_executable.steps().len());
     for (index, step) in conjunction_executable.steps().iter().enumerate() {
@@ -163,7 +167,7 @@ pub(crate) fn create_executors_for_conjunction(
                 let step_profile = pattern_profile.extend_or_get_step(index, || {
                     format!("{}", inner.make_var_mapped(conjunction_executable.variable_reverse_map()))
                 });
-                let step = ImmediateExecutor::new_intersection(inner, snapshot, thing_manager, step_profile)?;
+                let step = ImmediateExecutor::new_intersection(inner, snapshot, thing_manager, step_profile, row_goal)?;
                 steps.push(step.into());
             }
             ExecutionStep::UnsortedJoin(inner) => {
@@ -191,6 +195,7 @@ pub(crate) fn create_executors_for_conjunction(
                     function_registry,
                     subpattern_profile,
                     &negation_step.negation,
+                    NEGATION_ROW_GOAL,
                 )?;
                 // I shouldn't need to pass recursive here since it's stratified
                 steps.push(
@@ -230,6 +235,7 @@ pub(crate) fn create_executors_for_conjunction(
                             function_registry,
                             subquery_profile,
                             function,
+                            row_goal,
                         )?;
                         let inner = PatternExecutor::new(function.executable_id, inner_executors);
                         let step = InlinedCallExecutor::new(inner, function_call, function.parameter_registry.clone());
@@ -255,6 +261,7 @@ pub(crate) fn create_executors_for_conjunction(
                             function_registry,
                             branch_profile,
                             branch_executable,
+                            row_goal,
                         )?;
                         Ok::<_, Box<_>>(PatternExecutor::new(branch_executable.executable_id(), executors))
                     })
@@ -281,6 +288,7 @@ pub(crate) fn create_executors_for_conjunction(
                     function_registry,
                     subpattern_profile,
                     &step.optional,
+                    row_goal,
                 )?;
                 let inner_executor = PatternExecutor::new(step.optional.executable_id(), inner);
                 let inner_step = OptionalExecutor::new(
@@ -302,8 +310,14 @@ pub(crate) fn create_executors_for_function(
     function_registry: &ExecutableFunctionRegistry,
     query_profile: Arc<QueryProfile>,
     executable_function: &ExecutableFunction,
+    row_goal: Option<u64>,
 ) -> Result<Vec<StepExecutors>, Box<ConceptReadError>> {
     let executable_stages = &executable_function.executable_stages;
+    let body_row_goal = match &executable_function.returns {
+        ExecutableReturn::Stream(_) => row_goal,
+        ExecutableReturn::Single(SingleSelector::First, _) | ExecutableReturn::Check => Some(1),
+        ExecutableReturn::Single(SingleSelector::Last, _) | ExecutableReturn::Reduce(_) => None,
+    };
     let mut steps = create_executors_for_function_pipeline_stages(
         snapshot,
         thing_manager,
@@ -311,6 +325,7 @@ pub(crate) fn create_executors_for_function(
         &query_profile,
         executable_stages,
         executable_stages.len() - 1,
+        body_row_goal,
     )?;
     match &executable_function.returns {
         ExecutableReturn::Stream(positions) => {
@@ -349,7 +364,14 @@ pub(super) fn create_executors_for_function_pipeline_stages(
     query_profile: &QueryProfile,
     executable_stages: &[ExecutableStage],
     at_index: usize,
+    row_goal: Option<u64>,
 ) -> Result<Vec<StepExecutors>, Box<ConceptReadError>> {
+    let previous_stages_row_goal = match &executable_stages[at_index] {
+        ExecutableStage::Match(_) | ExecutableStage::Select(_) => row_goal,
+        ExecutableStage::Offset(offset) => row_goal.map(|goal| goal.saturating_add(offset.offset)),
+        ExecutableStage::Limit(limit) => Some(row_goal.map_or(limit.limit, |goal| goal.min(limit.limit))),
+        _ => None,
+    };
     let mut previous_stage_steps = if at_index > 0 {
         create_executors_for_function_pipeline_stages(
             snapshot,
@@ -358,6 +380,7 @@ pub(super) fn create_executors_for_function_pipeline_stages(
             query_profile,
             executable_stages,
             at_index - 1,
+            previous_stages_row_goal,
         )?
     } else {
         vec![]
@@ -380,6 +403,7 @@ pub(super) fn create_executors_for_function_pipeline_stages(
                 function_registry,
                 pattern_profile,
                 conjunction_executable,
+                row_goal,
             )?;
             previous_stage_steps.append(&mut executors);
             Ok(previous_stage_steps)
