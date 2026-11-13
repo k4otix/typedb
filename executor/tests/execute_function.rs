@@ -952,3 +952,42 @@ fn nested_patterns_stop_early() {
     let leaf_position = *positions.get("leaf").unwrap();
     assert_eq!(rows.iter().filter(|row| !row.get(leaf_position).is_none()).count(), 3);
 }
+
+#[test]
+fn negation_over_player_of_other_relation_types() {
+    // The sources also play roles in relation types ordered before and after emission
+    let custom_schema = r#"define
+        entity technique, plays coverage:technique;
+        entity source, plays coverage:source, plays emission:source, plays audit:source;
+        entity asset, plays emission:emitter;
+        relation coverage, relates technique, relates source;
+        relation emission, relates emitter, relates source;
+        relation audit, relates source;
+    "#;
+    let mut context = setup_common(custom_schema);
+    let links = (0..100)
+        .map(|i| {
+            format!(
+                "$t{i} isa technique; coverage (technique: $t{i}, source: $s1); audit (source: $s1);
+                $u{i} isa technique; coverage (technique: $u{i}, source: $s2); audit (source: $s2);
+                $e{i} isa asset; emission (emitter: $e{i}, source: $s1);"
+            )
+        })
+        .join("\n");
+    let data = format!(
+        r#"insert
+        $s1 isa source;
+        $s2 isa source;
+        {links}"#
+    );
+    run_write_query(&context, &data).unwrap();
+    reload_statistics(&mut context);
+
+    let query = r#"
+        match
+            coverage (technique: $t);
+            not { coverage (technique: $t, source: $s); emission (source: $s); };
+    "#;
+    let (rows, _positions) = run_read_query(&context, query).unwrap();
+    assert_eq!(rows.len(), 100);
+}
