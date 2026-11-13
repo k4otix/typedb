@@ -19,8 +19,9 @@ use crate::{
         control_instruction::{
             CollectingStage, ControlInstruction, ExecuteDisjunctionBranch, ExecuteImmediate, ExecuteInlinedFunction,
             ExecuteNegation, ExecuteOptional, ExecuteStreamModifier, ExecuteTabledCall, MapBatchToRowsForNested,
-            PatternStart, ReshapeForReturn, RestoreSuspension, StreamCollected, Yield,
+            PatternStart, ReplayInlinedFunction, ReshapeForReturn, RestoreSuspension, StreamCollected, Yield,
         },
+        function_call_cache::{CallLookup, FunctionCallCache, FunctionCallKey},
         nested_pattern_executor::{DisjunctionExecutor, InlinedCallExecutor, NegationExecutor, OptionalExecutor},
         step_executor::StepExecutors,
         suspension::{NestedPatternSuspension, PatternSuspension, QueryPatternSuspensions, TabledCallSuspension},
@@ -129,7 +130,7 @@ impl PatternExecutor {
                     if let Some(row_result) = iterator.next() {
                         let row_owned = row_result.unwrap().into_owned();
                         control_stack.push(MapBatchToRowsForNested { index, iterator }.into());
-                        self.push_nested_pattern(index, row_owned);
+                        self.push_nested_pattern(index, row_owned, context.function_call_cache.as_deref());
                     }
                 }
                 ControlInstruction::ExecuteNegation(ExecuteNegation { index, input }) => {
@@ -178,14 +179,35 @@ impl PatternExecutor {
                         self.push_next_instruction(context, index.next(), mapped)?;
                     }
                 }
-                ControlInstruction::ExecuteInlinedFunction(ExecuteInlinedFunction { index, input }) => {
+                ControlInstruction::ExecuteInlinedFunction(ExecuteInlinedFunction { index, input, mut recording }) => {
                     let executor = &mut executors[*index].unwrap_inlined_call();
                     let func_context = &context.clone_with_replaced_parameters(executor.parameter_registry.clone());
                     let batch_opt = may_push_nested(suspensions, index, BranchIndex(0), &input, |suspensions| {
                         executor.inner.batch_continue(func_context, interrupt, tabled_functions, suspensions)
                     })?;
-                    if let Some(mapped) = batch_opt.map(|batch| executor.map_output(input.as_reference(), batch)) {
-                        control_stack.push(ExecuteInlinedFunction { index, input: input.into_owned() }.into());
+                    match batch_opt {
+                        Some(batch) => {
+                            if let Some(recording) = recording.as_mut() {
+                                recording.record(&batch);
+                            }
+                            let mapped = executor.map_output(input.as_reference(), batch);
+                            control_stack
+                                .push(ExecuteInlinedFunction { index, input: input.into_owned(), recording }.into());
+                            self.push_next_instruction(context, index.next(), mapped)?;
+                        }
+                        None => {
+                            // Only a call which returned all its rows is cached
+                            if let (Some(recording), Some(cache)) = (recording, &context.function_call_cache) {
+                                cache.complete(recording);
+                            }
+                        }
+                    }
+                }
+                ControlInstruction::ReplayInlinedFunction(ReplayInlinedFunction { index, input, rows, next_row }) => {
+                    if let Some(batch) = rows.batch_starting(next_row) {
+                        let next_row = next_row + batch.len() as usize;
+                        let mapped = executors[*index].unwrap_inlined_call().map_output(input.as_reference(), batch);
+                        control_stack.push(ReplayInlinedFunction { index, input, rows, next_row }.into());
                         self.push_next_instruction(context, index.next(), mapped)?;
                     }
                 }
@@ -292,7 +314,12 @@ impl PatternExecutor {
         Ok(())
     }
 
-    fn push_nested_pattern(&mut self, index: ExecutorIndex, input: MaybeOwnedRow<'_>) {
+    fn push_nested_pattern(
+        &mut self,
+        index: ExecutorIndex,
+        input: MaybeOwnedRow<'_>,
+        function_call_cache: Option<&FunctionCallCache>,
+    ) {
         match &mut self.executors[*index] {
             StepExecutors::TabledCall(tabled_call) => {
                 tabled_call.prepare(input.clone().into_owned());
@@ -316,13 +343,23 @@ impl PatternExecutor {
                 self.control_stack.push(ExecuteNegation { index, input: input.into_owned() }.into());
             }
             StepExecutors::InlinedCall(InlinedCallExecutor { inner, arg_mapping, .. }) => {
-                let mapped_input = MaybeOwnedRow::new_owned(
-                    arg_mapping.iter().map(|&arg_pos| input.get(arg_pos).clone().into_owned()).collect(),
-                    input.multiplicity(),
-                    Provenance::INITIAL,
-                );
+                let arguments: Vec<_> =
+                    arg_mapping.iter().map(|&arg_pos| input.get(arg_pos).clone().into_owned()).collect();
+                let lookup = function_call_cache.map(|cache| {
+                    cache.lookup(FunctionCallKey::new(inner.executable_id, arguments.clone(), input.multiplicity()))
+                });
+                let recording = match lookup {
+                    Some(CallLookup::Cached(rows)) => {
+                        let input = input.into_owned();
+                        self.control_stack.push(ReplayInlinedFunction { index, input, rows, next_row: 0 }.into());
+                        return;
+                    }
+                    Some(CallLookup::Record(recording)) => Some(recording),
+                    Some(CallLookup::Execute) | None => None,
+                };
+                let mapped_input = MaybeOwnedRow::new_owned(arguments, input.multiplicity(), Provenance::INITIAL);
                 inner.prepare(FixedBatch::from(mapped_input));
-                self.control_stack.push(ExecuteInlinedFunction { index, input: input.into_owned() }.into());
+                self.control_stack.push(ExecuteInlinedFunction { index, input: input.into_owned(), recording }.into());
             }
             StepExecutors::StreamModifier(stream_modifier) => {
                 stream_modifier.inner().prepare(FixedBatch::from(input.as_reference()));
@@ -357,6 +394,7 @@ impl PatternExecutor {
                     suspensions: function_suspensions,
                     parameters,
                 } = pattern_state_mutex_guard.deref_mut();
+                // Tables may be incomplete while the function is evaluated, so its calls are not cached
                 let context_with_function_parameters = ExecutionContext::new_with_profile(
                     context.snapshot.clone(),
                     context.thing_manager.clone(),
@@ -437,7 +475,8 @@ fn restore_suspension(
                 }
                 StepExecutors::InlinedCall(inlined) => {
                     inlined.inner.prepare_to_restore_from_suspension(nested_pattern_depth);
-                    control_stack.push(ExecuteInlinedFunction { index, input: input_row.into_owned() }.into())
+                    control_stack
+                        .push(ExecuteInlinedFunction { index, input: input_row.into_owned(), recording: None }.into())
                 }
                 StepExecutors::StreamModifier(modifier) => {
                     modifier.inner().prepare_to_restore_from_suspension(nested_pattern_depth);

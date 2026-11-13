@@ -13,6 +13,7 @@ use crate::{
     read::{
         BranchIndex, ExecutorIndex,
         collecting_stage_executor::{CollectedStageIterator, CollectorEnum},
+        function_call_cache::{CallRecording, CallRows},
         stream_modifier::StreamModifierResultMapper,
     },
     row::MaybeOwnedRow,
@@ -34,6 +35,7 @@ pub(super) enum ControlInstruction {
 
     ExecuteDisjunctionBranch(ExecuteDisjunctionBranch),
     ExecuteInlinedFunction(ExecuteInlinedFunction),
+    ReplayInlinedFunction(ReplayInlinedFunction),
     ExecuteStreamModifier(ExecuteStreamModifier),
 
     ExecuteTabledCall(ExecuteTabledCall),
@@ -73,6 +75,15 @@ pub(super) struct ExecuteStreamModifier {
 pub(super) struct ExecuteInlinedFunction {
     pub(super) index: ExecutorIndex,
     pub(super) input: MaybeOwnedRow<'static>,
+    pub(super) recording: Option<Box<CallRecording>>,
+}
+
+#[derive(Debug)]
+pub(super) struct ReplayInlinedFunction {
+    pub(super) index: ExecutorIndex,
+    pub(super) input: MaybeOwnedRow<'static>,
+    pub(super) rows: Arc<CallRows>,
+    pub(super) next_row: usize,
 }
 
 #[derive(Debug)]
@@ -157,6 +168,7 @@ impl_control_instruction_from_inner!(
     ExecuteOptional,
     ExecuteDisjunctionBranch,
     ExecuteInlinedFunction,
+    ReplayInlinedFunction,
     ExecuteStreamModifier,
     ExecuteTabledCall,
     CollectingStage,

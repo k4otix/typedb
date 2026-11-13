@@ -18,6 +18,7 @@ use crate::read::pattern_executor::PatternExecutor;
 mod collecting_stage_executor;
 pub(super) mod control_instruction;
 pub mod expression_executor;
+pub(crate) mod function_call_cache;
 mod immediate_executor;
 pub(crate) mod nested_pattern_executor;
 pub(crate) mod pattern_executor;

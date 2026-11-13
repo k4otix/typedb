@@ -40,7 +40,7 @@ use ir::{
 };
 use itertools::Itertools;
 use lending_iterator::{AsHkt, AsNarrowingIterator, LendingIterator};
-use resource::profile::{CommitProfile, QueryProfile, StorageCounters};
+use resource::profile::{CommitProfile, StorageCounters};
 use storage::{
     MVCCStorage,
     durability_client::WALClient,
@@ -208,13 +208,7 @@ fn execute_insert<Snapshot: WritableSnapshot + 'static>(
     let snapshot = Arc::new(snapshot);
     let initial = ShimStage::new(
         input_rows,
-        ExecutionContext {
-            snapshot,
-            thing_manager,
-            function_manager: Arc::default(),
-            parameters: Arc::new(value_parameters),
-            profile: Arc::new(QueryProfile::new(false)),
-        },
+        ExecutionContext::new(snapshot, thing_manager, Arc::default(), Arc::new(value_parameters)),
     );
     let (input_iter, context) = initial.into_iterator();
     let insert_executor: InsertStageExecutor<ShimIterator> = InsertStageExecutor::new(Arc::new(insert_plan));
@@ -296,13 +290,7 @@ fn execute_delete<Snapshot: WritableSnapshot + 'static>(
     let snapshot = Arc::new(snapshot);
     let initial = ShimStage::new(
         input_rows,
-        ExecutionContext {
-            snapshot,
-            thing_manager,
-            function_manager: Arc::default(),
-            parameters: Arc::new(value_parameters),
-            profile: Arc::new(QueryProfile::new(false)),
-        },
+        ExecutionContext::new(snapshot, thing_manager, Arc::default(), Arc::new(value_parameters)),
     );
     let (input_iter, context) = initial.into_iterator();
     let delete_executor: DeleteStageExecutor<ShimIterator> = DeleteStageExecutor::new(Arc::new(delete_plan));

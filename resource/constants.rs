@@ -154,6 +154,11 @@ pub mod traversal {
     pub const FIXED_BATCH_ROWS_MAX: u32 = 64;
     pub const BATCH_DEFAULT_CAPACITY: usize = 10;
     pub const CHECK_INTERRUPT_FREQUENCY_ROWS: usize = 100;
+    // Rows returned by one non-recursive function call above which the call is not cached
+    pub const FUNCTION_CALL_CACHE_ROWS_PER_CALL_MAX: usize = 64 * FIXED_BATCH_ROWS_MAX as usize;
+    // Rows and distinct calls a query pipeline's function call cache holds at most
+    pub const FUNCTION_CALL_CACHE_ROWS_TOTAL_MAX: usize = 8 * FUNCTION_CALL_CACHE_ROWS_PER_CALL_MAX;
+    pub const FUNCTION_CALL_CACHE_CALLS_MAX: usize = 32 * 1024;
 }
 
 pub mod snapshot {

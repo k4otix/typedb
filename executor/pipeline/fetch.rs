@@ -74,7 +74,7 @@ impl<Snapshot: ReadableSnapshot + 'static> FetchStageExecutor<Snapshot> {
         context: ExecutionContext<Snapshot>,
         interrupt: ExecutionInterrupt,
     ) -> (impl Iterator<Item = Result<ConceptDocument, Box<PipelineExecutionError>>>, ExecutionContext<Snapshot>) {
-        let ExecutionContext { snapshot, thing_manager, function_manager, parameters, profile } = context.clone();
+        let ExecutionContext { snapshot, thing_manager, function_manager, parameters, profile, .. } = context.clone();
         let executable = self.executable;
         let functions = self.functions;
         let stage_profile = profile.profile_stage(|| String::from("Fetch"), executable.executable_id);
