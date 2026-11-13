@@ -877,3 +877,26 @@ fn schema_function_uses_relation_index() {
     // The relation index is not available to schema transactions
     assert!(!uses_relation_index(&context, context.storage.clone().open_snapshot_schema()));
 }
+
+#[test]
+fn role_name_shared_between_relation_types() {
+    let custom_schema = r#"define
+        entity person, plays employment:employee, plays contract:employee, plays contract:employer;
+        relation employment, relates employee;
+        relation contract, relates employee, relates employer;
+    "#;
+    let context = setup_common(custom_schema);
+    let data = r#"insert
+        $p isa person;
+        employment (employee: $p);
+        contract (employee: $p, employer: $p);
+    "#;
+    run_write_query(&context, data).unwrap();
+
+    let (rows, _positions) = run_read_query(&context, "match $r links (employee: $p);").unwrap();
+    assert_eq!(rows.len(), 2);
+    let (rows, _positions) = run_read_query(&context, "match $r isa contract, links (employee: $p);").unwrap();
+    assert_eq!(rows.len(), 1);
+    let (rows, _positions) = run_read_query(&context, "match $r links (employee: $p, employer: $p);").unwrap();
+    assert_eq!(rows.len(), 1);
+}

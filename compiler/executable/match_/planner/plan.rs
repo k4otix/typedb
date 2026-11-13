@@ -370,7 +370,11 @@ impl<'a> ConjunctionPlanBuilder<'a> {
         for constraint in conjunction.constraints() {
             match constraint {
                 Constraint::Kind(kind) => self.register_kind(kind),
-                Constraint::RoleName(role_name) => self.register_role_name(role_name),
+                Constraint::RoleName(role_name) => {
+                    if !is_role_of_links(conjunction, role_name.type_()) {
+                        self.register_role_name(role_name)
+                    }
+                }
                 Constraint::Label(label) => self.register_label(label),
                 Constraint::Value(value) => self.register_value(value),
 
@@ -727,6 +731,16 @@ impl<'a> ConjunctionPlanBuilder<'a> {
             planner_statistics,
         })
     }
+}
+
+// The links and indexed relation executors already restrict their roles to the annotations of the role variable,
+// which are the types its role name resolves to.
+fn is_role_of_links(conjunction: &Conjunction, role: &Vertex<Variable>) -> bool {
+    conjunction.constraints().iter().any(|constraint| match constraint {
+        Constraint::Links(links) => links.role_type() == role,
+        Constraint::IndexedRelation(indexed) => indexed.role_type_1() == role || indexed.role_type_2() == role,
+        _ => false,
+    })
 }
 
 struct DrainSorted<'a, T: Ord> {
