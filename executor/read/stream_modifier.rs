@@ -114,6 +114,15 @@ pub(super) enum StreamModifierResultMapper {
 }
 
 impl StreamModifierResultMapper {
+    /// Whether every later call to `map_output` would return `None`
+    pub(super) fn is_satisfied(&self) -> bool {
+        match self {
+            Self::Limit(inner) => inner.current >= inner.required,
+            Self::Check(inner) => inner.returned.is_some(),
+            Self::Select(_) | Self::Offset(_) | Self::Distinct(_) | Self::Last(_) => false,
+        }
+    }
+
     pub(super) fn map_output(&mut self, subquery_result: Option<FixedBatch>) -> Option<FixedBatch> {
         match self {
             Self::Select(inner) => inner.map_output(subquery_result),

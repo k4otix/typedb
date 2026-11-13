@@ -20,7 +20,7 @@ use error::{UnimplementedFeature, unimplemented_feature};
 use ir::pattern::expression::BuiltinConceptFunctionID;
 use itertools::Itertools;
 use lending_iterator::{LendingIterator, Peekable};
-use resource::profile::StepProfile;
+use resource::{constants::traversal::FIXED_BATCH_ROWS_MAX, profile::StepProfile};
 use storage::snapshot::ReadableSnapshot;
 
 use crate::{
@@ -59,6 +59,7 @@ impl ImmediateExecutor {
         snapshot: &Arc<impl ReadableSnapshot + 'static>,
         thing_manager: &Arc<ThingManager>,
         profile: Arc<StepProfile>,
+        row_goal: Option<u64>,
     ) -> Result<Self, Box<ConceptReadError>> {
         let IntersectionStep { sort_variable, instructions, selected_variables, output_width, .. } = step;
 
@@ -70,6 +71,7 @@ impl ImmediateExecutor {
             snapshot,
             thing_manager,
             profile,
+            row_goal,
         )?;
         Ok(Self::SortedJoin(executor))
     }
@@ -178,6 +180,8 @@ pub(crate) struct IntersectionExecutor {
     cartesian_iterator: CartesianIterator,
     input: Option<Peekable<FixedBatchRowIterator>>,
     input_exhausted: bool,
+    first_batch_rows: u32,
+    next_batch_rows: u32,
 
     intersection_value: VariableValue<'static>,
     intersection_row: Vec<VariableValue<'static>>,
@@ -202,7 +206,10 @@ impl IntersectionExecutor {
         snapshot: &Arc<impl ReadableSnapshot + 'static>,
         thing_manager: &Arc<ThingManager>,
         profile: Arc<StepProfile>,
+        row_goal: Option<u64>,
     ) -> Result<Self, Box<ConceptReadError>> {
+        let first_batch_rows =
+            row_goal.map_or(FIXED_BATCH_ROWS_MAX, |goal| goal.clamp(1, FIXED_BATCH_ROWS_MAX as u64) as u32);
         let instruction_count = instructions.len();
         let executors: Vec<InstructionExecutor> = instructions
             .into_iter()
@@ -219,6 +226,8 @@ impl IntersectionExecutor {
             cartesian_iterator: CartesianIterator::new(output_width as usize, instruction_count, profile.clone()),
             input: None,
             input_exhausted: false,
+            first_batch_rows,
+            next_batch_rows: first_batch_rows,
             intersection_value: VariableValue::None,
             intersection_row: vec![VariableValue::None; output_width as usize],
             intersection_multiplicity: 1,
@@ -230,6 +239,7 @@ impl IntersectionExecutor {
     fn reset(&mut self) {
         self.input = None;
         self.input_exhausted = false;
+        self.next_batch_rows = self.first_batch_rows;
         self.iterators.clear();
         self.cartesian_iterator.clear();
     }
@@ -265,13 +275,16 @@ impl IntersectionExecutor {
             return Ok(None);
         }
         let measurement = self.profile.start_measurement();
+        // with a row goal, batches start at the goal and double every time more rows are requested
+        let batch_rows = self.next_batch_rows;
+        self.next_batch_rows = (batch_rows * 2).min(FIXED_BATCH_ROWS_MAX);
         let output = if self.compute_next_row(context)? {
             // don't allocate batch until 1 answer is confirmed
             let mut batch = FixedBatch::new(self.output_width);
             batch.append(|mut row| self.write_next_row_into(&mut row));
             loop {
                 // TODO: Revert when we have a more elegant solution for executor memory pressure
-                if batch.is_full() {
+                if batch.len() >= batch_rows {
                     break;
                 }
                 if self.compute_next_row(context)? {
